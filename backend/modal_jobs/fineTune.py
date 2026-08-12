@@ -16,8 +16,8 @@ MODAL_SECRET_NAME = "sentinel"
 
 
 def _local_dataset_dir() -> Path:
-    """Repo Dataset/ folder on the machine running ``modal run`` (not in-container)."""
-    # backend/modal_jobs/fineTune.py → parents[2] == repo root
+
+    """Dataset/ on the machine running ``modal run`` (not in-container)."""
     return Path(__file__).resolve().parents[2] / "Dataset"
 
 
@@ -41,6 +41,8 @@ download_image = (
 train_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
+        # torch==2.2.0 is built against NumPy 1.x; pin before other deps pull NumPy 2.
+        "numpy<2",
         "torch==2.2.0",
         "transformers==4.40.0",
         "datasets==2.18.0",
@@ -48,6 +50,7 @@ train_image = (
         "bitsandbytes==0.43.0",
         "accelerate==0.29.0",
         "trl==0.8.1",
+        "rich",  # required by trl.trainer.utils
         "huggingface_hub",
         "sentencepiece",
         "protobuf",
@@ -157,7 +160,7 @@ def fine_tune() -> str:
     import os
 
     import torch
-    from datasets import load_dataset
+    from datasets import DatasetDict, load_dataset
     from peft import LoraConfig, TaskType, get_peft_model
     from transformers import (
         AutoModelForCausalLM,
@@ -211,11 +214,18 @@ def fine_tune() -> str:
         )
 
     print("Loading dataset from Modal Volume...")
-    data_files = {"train": str(train_path)}
-    if valid_path.exists():
-        data_files["validation"] = str(valid_path)
 
-    dataset = load_dataset("json", data_files=data_files)
+    # Load splits separately: train/valid JSONL schemas differ (valid has
+    # extra proj/idx/lang columns), and a single load_dataset(data_files=...)
+    # requires identical columns across files.
+
+    
+    train_ds = load_dataset("json", data_files=str(train_path), split="train")
+    splits = {"train": train_ds}
+    if valid_path.exists():
+        valid_ds = load_dataset("json", data_files=str(valid_path), split="train")
+        splits["validation"] = valid_ds
+    dataset = DatasetDict(splits)
 
     def format_prompt(example: dict) -> dict:
         # Match inference: review from the unified diff → free-text comment.
@@ -228,8 +238,13 @@ def fine_tune() -> str:
         )
         return {"text": text}
 
-    dataset = dataset.map(format_prompt, remove_columns=dataset["train"].column_names)
-
+    # Per-split map: column sets differ between train and validation.
+    dataset = DatasetDict(
+        {
+            name: split.map(format_prompt, remove_columns=split.column_names)
+            for name, split in dataset.items()
+        }
+    )
     if cfg["max_train_samples"]:
         n = min(cfg["max_train_samples"], len(dataset["train"]))
         dataset["train"] = dataset["train"].select(range(n))
@@ -287,8 +302,6 @@ def fine_tune() -> str:
 def main(force_upload: bool = False):
 
     """Upload dataset, cache CodeLlama on model-vol, then run LoRA fine-tune."""
-
-
     print("Starting full fine-tune pipeline...")
 
     _upload_dataset(force=force_upload)
@@ -297,6 +310,5 @@ def main(force_upload: bool = False):
     print(f"Model cached at: {path}")
 
     adapter = fine_tune.remote()
-
     print(f"Adapter saved at: {adapter}")
     print("Pipeline complete.")
