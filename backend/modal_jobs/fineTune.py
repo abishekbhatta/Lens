@@ -26,12 +26,12 @@ app = modal.App("sentinel")
 dataset_vol = modal.Volume.from_name("dataset-vol", create_if_missing=True)
 model_vol = modal.Volume.from_name("model-vol", create_if_missing=True)
 
-# Injected into remote containers as os.environ["HF_TOKEN"]
+
 hf_secret = modal.Secret.from_name(MODAL_SECRET_NAME, required_keys=["HF_TOKEN"])
 
 download_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install("huggingface_hub[hf_transfer]>=0.23.0")
+    .pip_install("huggingface_hub[hf_transfer]>=0.23.0") # For faster concurrent chunked downloding         
     .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
 )
 
@@ -63,7 +63,7 @@ TRAINING_CONFIG = {
     "learning_rate": 2e-4,
     "max_seq_length": 2048,
     "warmup_ratio": 0.05,
-    # Cap training rows for first smoke runs; set None to use the full split.
+
     "max_train_samples": None,
     "max_eval_samples": 2000,
 }
@@ -73,18 +73,32 @@ TRAINING_CONFIG = {
 
 
 def _upload_dataset(force: bool = False) -> None:
+    """Push local Dataset/*.jsonl into the Modal dataset volume.
 
-    """Push local Dataset/*.jsonl into the Modal dataset volume."""
-    
+    Skips files that already exist unless ``force`` is True.
+    """
     missing = [name for name in DATASET_FILES if not (LOCAL_DATASET_DIR / name).exists()]
     if missing:
         raise FileNotFoundError(
             f"Missing dataset files under {LOCAL_DATASET_DIR}: {missing}"
         )
 
+    existing: set[str] = set()
+    if not force:
+        try:
+            existing = {entry.path.lstrip("/") for entry in dataset_vol.listdir("/")}
+        except Exception:
+            # Empty / brand-new volume — nothing to skip.
+            existing = set()
+
+    to_upload = [name for name in DATASET_FILES if force or name not in existing]
+    if not to_upload:
+        print("Dataset already on volume 'dataset-vol'; skipping upload.")
+        return
+
     print(f"Uploading dataset from {LOCAL_DATASET_DIR} → volume 'dataset-vol'")
     with dataset_vol.batch_upload(force=force) as batch:
-        for name in DATASET_FILES:
+        for name in to_upload:
             local = LOCAL_DATASET_DIR / name
             remote = f"/{name}"
             print(f"  {local} → {remote} ({local.stat().st_size / 1e9:.2f} GB)")
@@ -103,6 +117,7 @@ def _upload_dataset(force: bool = False) -> None:
 def download_base_model(repo_id: str = BASE_MODEL) -> str:
 
     """Download CodeLlama weights into the model volume (once)."""
+    
     import os
 
     from huggingface_hub import snapshot_download
