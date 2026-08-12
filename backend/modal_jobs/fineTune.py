@@ -4,9 +4,7 @@ from pathlib import Path
 
 import modal
 
-# ---------------------------------------------------------------------------
 # Paths / constants
-# ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOCAL_DATASET_DIR = REPO_ROOT / "Dataset"
@@ -19,9 +17,9 @@ MODEL_MOUNT = Path("/models")
 ADAPTER_DIR = MODEL_MOUNT / "adapters" / "sentinel-codellama"
 MODAL_SECRET_NAME = "sentinel"
 
-# ---------------------------------------------------------------------------
-# Modal app, image, volumes, secrets
-# ---------------------------------------------------------------------------
+
+
+# Modal app, image, and volumes
 
 app = modal.App("sentinel")
 
@@ -71,9 +69,8 @@ TRAINING_CONFIG = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Local helpers
-# ---------------------------------------------------------------------------
+# Helper functions
+
 
 def _upload_dataset(force: bool = False) -> None:
 
@@ -95,9 +92,7 @@ def _upload_dataset(force: bool = False) -> None:
     print("Dataset upload complete.")
 
 
-# ---------------------------------------------------------------------------
-# Remote: download / cache base model
-# ---------------------------------------------------------------------------
+# Download / cache base model
 
 @app.function(
     image=download_image,
@@ -125,9 +120,8 @@ def download_base_model(repo_id: str = BASE_MODEL) -> str:
     return str(dest)
 
 
-# ---------------------------------------------------------------------------
+
 # Remote: LoRA fine-tune
-# ---------------------------------------------------------------------------
 
 @app.function(
     image=train_image,
@@ -194,7 +188,7 @@ def fine_tune() -> str:
     valid_path = DATA_MOUNT / "msg-valid.jsonl"
     if not train_path.exists():
         raise FileNotFoundError(
-            f"{train_path} missing — run with --action upload (or setup) first"
+            f"{train_path} missing — dataset not found on volume 'dataset-vol'"
         )
 
     print("Loading dataset from Modal Volume...")
@@ -268,36 +262,22 @@ def fine_tune() -> str:
     return str(ADAPTER_DIR)
 
 
-# ---------------------------------------------------------------------------
-# Local entrypoint
-# ---------------------------------------------------------------------------
+# Local entrypoint 
 
 @app.local_entrypoint()
-def main(action: str = "setup", force_upload: bool = False):
-    """
-    action:
-      upload         — upload Dataset/*.jsonl to dataset-vol
-      download-model — cache CodeLlama-7b-Instruct-hf on model-vol
-      setup          — upload + download-model
-      train          — run LoRA fine-tune
-      all            — setup + train
-    """
-    action = action.strip().lower()
-    print(f"Action: {action}")
+def main(force_upload: bool = False):
 
-    if action in {"upload", "setup", "all"}:
-        _upload_dataset(force=force_upload)
+    """Upload dataset, cache CodeLlama on model-vol, then run LoRA fine-tune."""
 
-    if action in {"download-model", "setup", "all"}:
-        path = download_base_model.remote(BASE_MODEL)
-        print(f"Model cached at: {path}")
 
-    if action in {"train", "all"}:
-        adapter = fine_tune.remote()
-        print(f"Adapter saved at: {adapter}")
+    print("Starting full fine-tune pipeline...")
 
-    if action not in {"upload", "download-model", "setup", "train", "all"}:
-        raise SystemExit(
-            f"Unknown action '{action}'. "
-            "Use: upload | download-model | setup | train | all"
-        )
+    _upload_dataset(force=force_upload)
+
+    path = download_base_model.remote(BASE_MODEL)
+    print(f"Model cached at: {path}")
+
+    adapter = fine_tune.remote()
+
+    print(f"Adapter saved at: {adapter}")
+    print("Pipeline complete.")
