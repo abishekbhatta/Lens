@@ -41,7 +41,8 @@ download_image = (
 train_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        # torch==2.2.0 is built against NumPy 1.x; pin before other deps pull NumPy 2.
+
+        # torch==2.2.0 is built against NumPy 1.x; 
         "numpy<2",
         "torch==2.2.0",
         "transformers==4.40.0",
@@ -70,7 +71,10 @@ TRAINING_CONFIG = {
     "max_seq_length": 2048,
     "warmup_ratio": 0.05,
 
-    "max_train_samples": None,
+
+    # Full train set is ~118k rows; set None to use all.
+
+    "max_train_samples": 40_000, #Set to 40k for smaller run since A1000 is limited
     "max_eval_samples": 2000,
 }
 
@@ -148,7 +152,7 @@ def download_base_model(repo_id: str = BASE_MODEL) -> str:
 @app.function(
     image=train_image,
     gpu="A100",
-    timeout=60 * 60 * 4,
+    timeout=60 * 60 * 7,  # headroom for ~5h train + load/eval
     secrets=[hf_secret],
     volumes={
         DATA_MOUNT.as_posix(): dataset_vol,
@@ -219,7 +223,7 @@ def fine_tune() -> str:
     # extra proj/idx/lang columns), and a single load_dataset(data_files=...)
     # requires identical columns across files.
 
-    
+
     train_ds = load_dataset("json", data_files=str(train_path), split="train")
     splits = {"train": train_ds}
     if valid_path.exists():
