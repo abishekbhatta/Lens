@@ -6,9 +6,6 @@ import modal
 
 # Paths / constants
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-LOCAL_DATASET_DIR = REPO_ROOT / "Dataset"
-
 DATASET_FILES = ("msg-train.jsonl", "msg-valid.jsonl", "msg-test.jsonl")
 
 BASE_MODEL = "codellama/CodeLlama-7b-Instruct-hf"
@@ -16,6 +13,12 @@ DATA_MOUNT = Path("/data")
 MODEL_MOUNT = Path("/models")
 ADAPTER_DIR = MODEL_MOUNT / "adapters" / "sentinel-codellama"
 MODAL_SECRET_NAME = "sentinel"
+
+
+def _local_dataset_dir() -> Path:
+    """Repo Dataset/ folder on the machine running ``modal run`` (not in-container)."""
+    # backend/modal_jobs/fineTune.py → parents[2] == repo root
+    return Path(__file__).resolve().parents[2] / "Dataset"
 
 
 
@@ -77,10 +80,11 @@ def _upload_dataset(force: bool = False) -> None:
 
     Skips files that already exist unless ``force`` is True.
     """
-    missing = [name for name in DATASET_FILES if not (LOCAL_DATASET_DIR / name).exists()]
+    local_dataset_dir = _local_dataset_dir()
+    missing = [name for name in DATASET_FILES if not (local_dataset_dir / name).exists()]
     if missing:
         raise FileNotFoundError(
-            f"Missing dataset files under {LOCAL_DATASET_DIR}: {missing}"
+            f"Missing dataset files under {local_dataset_dir}: {missing}"
         )
 
     existing: set[str] = set()
@@ -96,10 +100,10 @@ def _upload_dataset(force: bool = False) -> None:
         print("Dataset already on volume 'dataset-vol'; skipping upload.")
         return
 
-    print(f"Uploading dataset from {LOCAL_DATASET_DIR} → volume 'dataset-vol'")
+    print(f"Uploading dataset from {local_dataset_dir} → volume 'dataset-vol'")
     with dataset_vol.batch_upload(force=force) as batch:
         for name in to_upload:
-            local = LOCAL_DATASET_DIR / name
+            local = local_dataset_dir / name
             remote = f"/{name}"
             print(f"  {local} → {remote} ({local.stat().st_size / 1e9:.2f} GB)")
             batch.put_file(str(local), remote)
@@ -117,7 +121,7 @@ def _upload_dataset(force: bool = False) -> None:
 def download_base_model(repo_id: str = BASE_MODEL) -> str:
 
     """Download CodeLlama weights into the model volume (once)."""
-    
+
     import os
 
     from huggingface_hub import snapshot_download
