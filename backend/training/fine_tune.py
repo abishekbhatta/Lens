@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DATASET_DIR = REPO_ROOT / "Dataset"
-MODELS_DIR = REPO_ROOT / "models"
+MODELS_DIR = BACKEND_ROOT / "models"
 ADAPTER_DIR = MODELS_DIR / "adapters" / "sentinel-codellama"
 CHECKPOINT_DIR = MODELS_DIR / "checkpoints" / "sentinel-codellama"
 
@@ -63,7 +63,7 @@ def ensure_dataset() -> Path:
 
 
 def download_base_model(repo_id: str = BASE_MODEL, force: bool = False) -> Path:
-    """Download CodeLlama weights into models/ (skipped if already present)."""
+    """Download CodeLlama weights into backend/models/ (skipped if already present)."""
     from huggingface_hub import snapshot_download
 
     dest = MODELS_DIR / repo_id
