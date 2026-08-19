@@ -1,0 +1,16 @@
+# GPU fine-tuning deps for the college / remote server.
+# Install: pip install -r backend/training/requirements.txt
+
+numpy<2
+torch==2.2.0
+transformers==4.40.0
+datasets==2.18.0
+peft==0.10.0
+bitsandbytes==0.43.0
+accelerate==0.29.0
+trl==0.8.1
+rich
+huggingface_hub>=0.23.0
+sentencepiece
+protobuf
+python-dotenv>=1.0.1
