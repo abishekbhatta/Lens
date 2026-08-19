@@ -1,19 +1,16 @@
-"""LoRA fine-tune CodeLlama on the local GPU
+"""LoRA fine-tune CodeLlama on the local GPU.
 
-Run from repo root or backend/:
+Run from repo root:
     python backend/training/fine_tune.py
 
 """
 
 from __future__ import annotations
 
-import argparse
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-
-# Paths / constants
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -37,8 +34,8 @@ TRAINING_CONFIG = {
     "learning_rate": 2e-4,
     "max_seq_length": 2048,
     "warmup_ratio": 0.05,
-    "max_train_samples": None,  
-    "max_eval_samples": None,  
+    "max_train_samples": None,
+    "max_eval_samples": None,
 }
 
 
@@ -51,78 +48,56 @@ def _hf_token() -> str | None:
     return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 
 
-def ensure_dataset() -> Path:
-    """Verify Dataset/*.jsonl exists on this machine."""
+def _ensure_dataset() -> None:
     missing = [name for name in DATASET_FILES if not (DATASET_DIR / name).exists()]
     if missing:
         raise FileNotFoundError(
             f"Missing dataset files under {DATASET_DIR}: {missing}"
         )
     print(f"Dataset ready at {DATASET_DIR}")
-    return DATASET_DIR
 
 
-def download_base_model(repo_id: str = BASE_MODEL, force: bool = False) -> Path:
-    """Download CodeLlama weights into backend/models/ (skipped if already present)."""
+def _ensure_base_model() -> Path:
+    """Download base weights if not already cached locally."""
     from huggingface_hub import snapshot_download
 
-    dest = MODELS_DIR / repo_id
-    if dest.exists() and any(dest.iterdir()) and not force:
+    dest = MODELS_DIR / BASE_MODEL
+    if dest.exists() and any(dest.iterdir()):
         print(f"Base model already cached at {dest}")
         return dest
 
-    token = _hf_token()
     dest.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading {repo_id} → {dest}")
+    print(f"Downloading {BASE_MODEL} → {dest}")
     snapshot_download(
-        repo_id=repo_id,
+        repo_id=BASE_MODEL,
         local_dir=str(dest),
-        token=token,
+        token=_hf_token(),
     )
     print(f"Base model ready at {dest}")
     return dest
 
 
-def fine_tune(
-    *,
-    max_train_samples: int | None = None,
-    max_eval_samples: int | None = None,
-) -> Path:
-    """LoRA fine-tune CodeLlama on the local GPU."""
+def _fine_tune() -> Path:
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     import torch
     from datasets import DatasetDict, load_dataset
     from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
-    from transformers import (
-        AutoModelForCausalLM,
-        AutoTokenizer,
-        BitsAndBytesConfig,
-        TrainingArguments,
-    )
-    from trl import SFTTrainer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from trl import SFTConfig, SFTTrainer
 
     if not torch.cuda.is_available():
         raise RuntimeError(
-            "CUDA GPU not available. This script expects a CUDA device on the "
-            "college server (check nvidia-smi / CUDA_VISIBLE_DEVICES)."
+            "CUDA GPU not available. This script expects a CUDA device "
+            "(check nvidia-smi / CUDA_VISIBLE_DEVICES)."
         )
 
-    cfg = dict(TRAINING_CONFIG)
-    if max_train_samples is not None:
-        cfg["max_train_samples"] = max_train_samples
-    if max_eval_samples is not None:
-        cfg["max_eval_samples"] = max_eval_samples
-
+    cfg = TRAINING_CONFIG
     token = _hf_token()
-    local_model = MODELS_DIR / cfg["base_model"]
-    model_id = str(local_model) if local_model.exists() else cfg["base_model"]
+    model_id = str(MODELS_DIR / cfg["base_model"])
 
     props = torch.cuda.get_device_properties(0)
-    print(
-        f"GPU: {props.name} "
-        f"({props.total_memory / (1024**3):.1f} GiB)"
-    )
+    print(f"GPU: {props.name} ({props.total_memory / (1024**3):.1f} GiB)")
     print(f"Loading base model: {model_id}")
 
     bnb_config = BitsAndBytesConfig(
@@ -147,30 +122,30 @@ def fine_tune(
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    lora_config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
-        r=cfg["lora_r"],
-        lora_alpha=cfg["lora_alpha"],
-        lora_dropout=cfg["lora_dropout"],
-        target_modules=cfg["target_modules"],
-        bias="none",
+    model = get_peft_model(
+        model,
+        LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=cfg["lora_r"],
+            lora_alpha=cfg["lora_alpha"],
+            lora_dropout=cfg["lora_dropout"],
+            target_modules=cfg["target_modules"],
+            bias="none",
+        ),
     )
-    model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
     train_path = DATASET_DIR / "msg-train.jsonl"
     valid_path = DATASET_DIR / "msg-valid.jsonl"
-    if not train_path.exists():
-        raise FileNotFoundError(f"{train_path} missing")
 
     print("Loading dataset from disk...")
-    # Load splits separately: train/valid JSONL schemas differ (valid has
-    # extra proj/idx/lang columns).
-    train_ds = load_dataset("json", data_files=str(train_path), split="train")
-    splits: dict = {"train": train_ds}
+    splits: dict = {
+        "train": load_dataset("json", data_files=str(train_path), split="train")
+    }
     if valid_path.exists():
-        valid_ds = load_dataset("json", data_files=str(valid_path), split="train")
-        splits["validation"] = valid_ds
+        splits["validation"] = load_dataset(
+            "json", data_files=str(valid_path), split="train"
+        )
     dataset = DatasetDict(splits)
 
     def format_prompt(example: dict) -> dict:
@@ -202,35 +177,44 @@ def fine_tune(
     )
 
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    training_args = TrainingArguments(
-        output_dir=str(CHECKPOINT_DIR),
-        num_train_epochs=cfg["num_epochs"],
-        per_device_train_batch_size=cfg["per_device_batch_size"],
-        gradient_accumulation_steps=cfg["gradient_accumulation_steps"],
-        learning_rate=cfg["learning_rate"],
-        warmup_ratio=cfg["warmup_ratio"],
-        lr_scheduler_type="cosine",
-        logging_steps=10,
-        save_strategy="epoch",
-        evaluation_strategy="epoch" if "validation" in dataset else "no",
-        bf16=True,
-        optim="paged_adamw_8bit",
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
-        dataloader_pin_memory=False,
-        report_to="none",
+
+    steps_per_epoch = max(
+        1,
+        len(dataset["train"])
+        // (cfg["per_device_batch_size"] * cfg["gradient_accumulation_steps"]),
+    )
+    warmup_steps = max(
+        1, int(steps_per_epoch * cfg["num_epochs"] * cfg["warmup_ratio"])
     )
 
     trainer = SFTTrainer(
         model=model,
         train_dataset=dataset["train"],
         eval_dataset=dataset.get("validation"),
-        dataset_text_field="text",
-        max_seq_length=cfg["max_seq_length"],
-        args=training_args,
-        packing=False,
+        processing_class=tokenizer,
+        args=SFTConfig(
+            output_dir=str(CHECKPOINT_DIR),
+            num_train_epochs=cfg["num_epochs"],
+            per_device_train_batch_size=cfg["per_device_batch_size"],
+            gradient_accumulation_steps=cfg["gradient_accumulation_steps"],
+            learning_rate=cfg["learning_rate"],
+            warmup_steps=warmup_steps,
+            lr_scheduler_type="cosine",
+            logging_steps=10,
+            save_strategy="epoch",
+            eval_strategy="epoch" if "validation" in dataset else "no",
+            bf16=True,
+            optim="paged_adamw_8bit",
+            gradient_checkpointing=True,
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+            dataloader_pin_memory=False,
+            report_to="none",
+            dataset_text_field="text",
+            max_length=cfg["max_seq_length"],
+            packing=False,
+            loss_type="nll",
+        ),
     )
-    tokenizer.padding_side = "right"
 
     print("Starting training...")
     trainer.train()
@@ -244,47 +228,12 @@ def fine_tune(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Fine-tune CodeLlama LoRA adapter on the system GPU."
-    )
-    parser.add_argument(
-        "--skip-download",
-        action="store_true",
-        help="Do not download the base model (use cache or Hub id).",
-    )
-    parser.add_argument(
-        "--force-download",
-        action="store_true",
-        help="Re-download the base model even if cached.",
-    )
-    parser.add_argument(
-        "--max-train-samples",
-        type=int,
-        default=None,
-        help="Override TRAINING_CONFIG max_train_samples (omit for config default).",
-    )
-    parser.add_argument(
-        "--max-eval-samples",
-        type=int,
-        default=None,
-        help="Override TRAINING_CONFIG max_eval_samples.",
-    )
-    args = parser.parse_args()
-
     _load_env()
-    print("Starting fine-tune pipeline on system GPU...")
-    ensure_dataset()
-
-    if not args.skip_download:
-        path = download_base_model(BASE_MODEL, force=args.force_download)
-        print(f"Model cached at: {path}")
-
-    adapter = fine_tune(
-        max_train_samples=args.max_train_samples,
-        max_eval_samples=args.max_eval_samples,
-    )
+    print("Starting fine-tune pipeline...")
+    _ensure_dataset()
+    _ensure_base_model()
+    adapter = _fine_tune()
     print(f"Adapter saved at: {adapter}")
-    print("Pipeline complete.")
 
 
 if __name__ == "__main__":
