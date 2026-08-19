@@ -3,3 +3,4 @@ Dataset/
 .venv/
 models/
 backend/models/
+.cursor/
