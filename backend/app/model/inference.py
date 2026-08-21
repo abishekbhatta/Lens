@@ -40,7 +40,10 @@ def build_prompt(diff: str) -> str:
 class GenerationSettings:
     """Decoding knobs. Low temperature keeps reviews grounded in the diff."""
 
-    max_new_tokens: int = 512
+    # Measured outputs run 6-26 tokens, matching the short human comments in the
+    # training set. Every token reserved here is a token taken away from the diff,
+    # so this stays tight while leaving generous headroom.
+    max_new_tokens: int = 160
     temperature: float = 0.4
     top_p: float = 0.9
     repetition_penalty: float = 1.15
@@ -116,6 +119,21 @@ class DiffReviewer:
         self._tokenizer = tokenizer
         self._prompt_overhead = len(tokenizer(build_prompt(""))["input_ids"])
 
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
+
+    @property
+    def prompt_overhead(self) -> int:
+        """Tokens consumed by the prompt scaffolding alone, excluding the diff."""
+        self.load()
+        return self._prompt_overhead
+
+    def count_tokens(self, text: str) -> int:
+        """Exact token count, so chunking can use the model's own tokenizer."""
+        self.load()
+        return len(self._tokenizer(text, add_special_tokens=False)["input_ids"])
+
     def review(self, diff: str, settings: GenerationSettings | None = None) -> str:
         """Generate a single review comment for one unified diff."""
         if not diff.strip():
@@ -190,8 +208,8 @@ def main() -> None:
         type=Path,
         help="Path to a unified diff. Reads stdin when omitted.",
     )
-    parser.add_argument("--max-new-tokens", type=int, default=256)
-    parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--max-new-tokens", type=int, default=160)
+    parser.add_argument("--temperature", type=float, default=0.4)
     args = parser.parse_args()
 
     diff = args.diff_file.read_text() if args.diff_file else sys.stdin.read()
