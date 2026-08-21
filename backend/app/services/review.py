@@ -1,8 +1,5 @@
 """Turn a raw unified diff into a list of review comments.
 
-This is the layer that joins diff parsing (``app.services.diff``) to the model
-(``app.model.inference``). Keeping it separate from the HTTP layer means the
-Redis worker can reuse exactly the same logic later.
 """
 
 from __future__ import annotations
@@ -33,6 +30,7 @@ def review_diff(
     settings: GenerationSettings | None = None,
     max_comments: int | None = None,
 ) -> list[ReviewComment]:
+
     """Review every reviewable hunk in a diff, one model call per hunk."""
     settings = settings or GenerationSettings()
     reviewer = get_reviewer()
