@@ -20,8 +20,8 @@ ADAPTER_DIR = MODELS_DIR / "adapters" / "sentinel-codellama"
 
 
 INSTRUCTION = (
-    "You are an expert code reviewer. Analyse the following"
-    "unified diff and write a concise, actionable review comment."
+        "You are an expert code reviewer. Analyse the following unified diff, "
+        "explain the exact bug or issue in detail, and suggest the corrected code."
 )
 
 
@@ -40,10 +40,10 @@ def build_prompt(diff: str) -> str:
 class GenerationSettings:
     """Decoding knobs. Low temperature keeps reviews grounded in the diff."""
 
-    max_new_tokens: int = 256
-    temperature: float = 0.2
+    max_new_tokens: int = 512
+    temperature: float = 0.4
     top_p: float = 0.9
-    repetition_penalty: float = 1.05
+    repetition_penalty: float = 1.15
 
 
 class DiffReviewer:
@@ -66,7 +66,7 @@ class DiffReviewer:
 
     def load(self) -> None:
         """Load base weights in 4-bit, then apply the LoRA adapter on top."""
-        
+
         if self._model is not None:
             return
 
