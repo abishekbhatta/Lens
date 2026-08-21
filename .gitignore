@@ -4,3 +4,5 @@ Dataset/
 models/
 backend/models/
 .cursor/
+
+__pycache__/
