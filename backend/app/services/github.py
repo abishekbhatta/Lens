@@ -1,0 +1,260 @@
+"""Read pull requests from the GitHub REST API.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+import httpx
+from dotenv import load_dotenv
+
+from app.services.diff import FileDiff, FileStatus, parse_file_patch
+
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
+
+API_ROOT = "https://api.github.com"
+API_VERSION = "2022-11-28"
+# GitHub caps the files endpoint at 100 per page and 3000 files per PR.
+FILES_PER_PAGE = 100
+MAX_FILE_PAGES = 30
+
+PR_URL = re.compile(
+    r"^(?:https?://)?(?:www\.)?github\.com/([^/]+)/([^/]+)/pull/(\d+)"
+)
+PR_SHORTHAND = re.compile(r"^([^/\s]+)/([^/#\s]+)#(\d+)$")
+
+# GitHub's per-file status vocabulary differs slightly from ours.
+STATUS_MAP: dict[str, FileStatus] = {
+    "added": "added",
+    "removed": "deleted",
+    "modified": "modified",
+    "renamed": "renamed",
+    "copied": "modified",
+    "changed": "modified",
+    "unchanged": "modified",
+}
+
+
+class GitHubError(RuntimeError):
+    """Any failure talking to the GitHub API."""
+
+
+class PullRequestNotFound(GitHubError):
+    pass
+
+
+class RateLimited(GitHubError):
+    pass
+
+
+@dataclass(frozen=True)
+class PullRequestRef:
+    """Identifies a PR without carrying any of its content."""
+
+    owner: str
+    repo: str
+    number: int
+
+    def __str__(self) -> str:
+        return f"{self.owner}/{self.repo}#{self.number}"
+
+
+@dataclass(frozen=True)
+class PullRequest:
+    ref: PullRequestRef
+    title: str
+    author: str
+    state: str
+    draft: bool
+    # Needed to post inline review comments: GitHub anchors them to a commit.
+    head_sha: str
+    base_sha: str
+    additions: int
+    deletions: int
+    changed_files: int
+
+
+def parse_pr_reference(value: str) -> PullRequestRef:
+    """Accept a PR URL or ``owner/repo#number`` shorthand."""
+    text = value.strip()
+    for pattern in (PR_URL, PR_SHORTHAND):
+        match = pattern.match(text)
+        if match:
+            owner, repo, number = match.groups()
+            return PullRequestRef(owner=owner, repo=repo, number=int(number))
+    raise ValueError(
+        f"Unrecognised pull request reference: {value!r}. Expected "
+        "'https://github.com/owner/repo/pull/123' or 'owner/repo#123'."
+    )
+
+
+def github_token() -> str | None:
+    load_dotenv(BACKEND_ROOT / ".env")
+    return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+
+
+class GitHubClient:
+    """Thin wrapper over the endpoints Sentinel needs."""
+
+    def __init__(
+        self,
+        token: str | None = None,
+        api_root: str = API_ROOT,
+        timeout: float = 30.0,
+    ) -> None:
+        self.api_root = api_root.rstrip("/")
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": API_VERSION,
+            "User-Agent": "sentinel-review-bot",
+        }
+        resolved = token if token is not None else github_token()
+        if resolved:
+            headers["Authorization"] = f"Bearer {resolved}"
+        self._client = httpx.Client(headers=headers, timeout=timeout)
+
+    def __enter__(self) -> GitHubClient:
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._client.close()
+
+    def get_pull_request(self, ref: PullRequestRef) -> PullRequest:
+        payload = self._get_json(f"/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}")
+        return PullRequest(
+            ref=ref,
+            title=payload.get("title") or "",
+            author=(payload.get("user") or {}).get("login", ""),
+            state=payload.get("state") or "",
+            draft=bool(payload.get("draft")),
+            head_sha=(payload.get("head") or {}).get("sha", ""),
+            base_sha=(payload.get("base") or {}).get("sha", ""),
+            additions=payload.get("additions", 0),
+            deletions=payload.get("deletions", 0),
+            changed_files=payload.get("changed_files", 0),
+        )
+
+    def get_pull_request_files(self, ref: PullRequestRef) -> list[FileDiff]:
+        """Fetch every changed file, already parsed into reviewable hunks."""
+        files: list[FileDiff] = []
+        for page in range(1, MAX_FILE_PAGES + 1):
+            batch = self._get_json(
+                f"/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}/files",
+                params={"per_page": FILES_PER_PAGE, "page": page},
+            )
+            if not batch:
+                break
+
+            for entry in batch:
+                files.append(_to_file_diff(entry))
+
+            if len(batch) < FILES_PER_PAGE:
+                break
+        return files
+
+    def get_pull_request_diff(self, ref: PullRequestRef) -> str:
+        """Raw unified diff. Raises ``GitHubError`` when the PR is too large."""
+        response = self._client.get(
+            f"{self.api_root}/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}",
+            headers={"Accept": "application/vnd.github.diff"},
+        )
+        if response.status_code == 406:
+            raise GitHubError(
+                f"{ref} is too large for a single diff; use get_pull_request_files()"
+            )
+        self._raise_for_status(response, ref)
+        return response.text
+
+    def _get_json(self, path: str, params: dict | None = None):
+        response = self._client.get(f"{self.api_root}{path}", params=params)
+        self._raise_for_status(response, path)
+        return response.json()
+
+    def _raise_for_status(self, response: httpx.Response, context) -> None:
+        if response.is_success:
+            return
+
+        if response.status_code == 404:
+            raise PullRequestNotFound(
+                f"{context} not found, or the token cannot see it (private repo?)"
+            )
+
+        # GitHub reports both rate limiting as 403
+        remaining = response.headers.get("x-ratelimit-remaining")
+        if response.status_code in (403, 429) and remaining == "0":
+            raise RateLimited(
+                "GitHub rate limit exhausted; resets at epoch "
+                f"{response.headers.get('x-ratelimit-reset', 'unknown')}"
+            )
+        if response.status_code == 401:
+            raise GitHubError("GitHub rejected the token (401). Check GITHUB_TOKEN.")
+
+        raise GitHubError(
+            f"GitHub returned {response.status_code} for {context}: "
+            f"{response.text[:200]}"
+        )
+
+
+def _to_file_diff(entry: dict) -> FileDiff:
+    path = entry.get("filename") or ""
+    patch = entry.get("patch")
+    status = STATUS_MAP.get(entry.get("status", "modified"), "modified")
+
+    # Binary files above GitHub's per-file size cap arrive with no
+    # patch at all
+    if not patch:
+        return FileDiff(path=path, old_path=None, status="binary", hunks=())
+
+    return parse_file_patch(
+        path=path,
+        patch=patch,
+        status=status,
+        old_path=entry.get("previous_filename"),
+    )
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Inspect a pull request's diff.")
+    parser.add_argument("--pr", required=True, help="PR URL or owner/repo#number")
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Print the raw unified diff instead of a hunk summary.",
+    )
+    args = parser.parse_args()
+
+    ref = parse_pr_reference(args.pr)
+    with GitHubClient() as client:
+        if args.raw:
+            print(client.get_pull_request_diff(ref))
+            return
+
+        pr = client.get_pull_request(ref)
+        print(f"{pr.ref}  {pr.title}")
+        print(
+            f"  by {pr.author} | {pr.state}{' (draft)' if pr.draft else ''} | "
+            f"+{pr.additions}/-{pr.deletions} across {pr.changed_files} files"
+        )
+        print(f"  head {pr.head_sha[:12]}  base {pr.base_sha[:12]}")
+
+        files = client.get_pull_request_files(ref)
+        reviewable = [f for f in files if f.is_reviewable]
+        print(f"\n{len(files)} files fetched, {len(reviewable)} reviewable\n")
+        for file_diff in files:
+            mark = "*" if file_diff.is_reviewable else " "
+            print(
+                f" {mark} {file_diff.path}  [{file_diff.status}] "
+                f"{len(file_diff.hunks)} hunks"
+            )
+
+
+if __name__ == "__main__":
+    main()
