@@ -221,13 +221,26 @@ def _to_file_diff(entry: dict) -> FileDiff:
 
 def main() -> None:
     import argparse
+    import sys
 
-    parser = argparse.ArgumentParser(description="Inspect a pull request's diff.")
+    parser = argparse.ArgumentParser(description="Inspect or review a pull request.")
     parser.add_argument("--pr", required=True, help="PR URL or owner/repo#number")
     parser.add_argument(
         "--raw",
         action="store_true",
         help="Print the raw unified diff instead of a hunk summary.",
+    )
+    parser.add_argument(
+        "--review",
+        action="store_true",
+        help="Run the fine-tuned model on each reviewable hunk and print comments.",
+    )
+    parser.add_argument(
+        "--max-hunks",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap model calls (default: all reviewable hunks). Use on large PRs.",
     )
     args = parser.parse_args()
 
@@ -254,6 +267,31 @@ def main() -> None:
                 f" {mark} {file_diff.path}  [{file_diff.status}] "
                 f"{len(file_diff.hunks)} hunks"
             )
+
+    if not args.review:
+        return
+
+    
+    """
+    The following block is for the testing purposes. Once github intergration is fully-setup, the following block will be removed.
+    """
+
+
+    #Used for to display the comments on the terminal.
+    
+    from app.services.review import review_files
+
+    print("\nLoading model...", file=sys.stderr)
+    comments = review_files(files, max_comments=args.max_hunks)
+    if not comments:
+        print("\nNo comments generated (no reviewable hunks or empty model output).")
+        return
+
+    print(f"\n{len(comments)} comment(s):\n")
+    for comment in comments:
+        print(f"--- {comment.path}:{comment.line} ---")
+        print(comment.body)
+        print()
 
 
 if __name__ == "__main__":
