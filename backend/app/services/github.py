@@ -185,7 +185,7 @@ class GitHubClient:
                 f"{context} not found, or the token cannot see it (private repo?)"
             )
 
-        # GitHub reports both rate limiting as 403
+        # GitHub reports both rate limiting as 403. They provide 5000 requests/ hr
         remaining = response.headers.get("x-ratelimit-remaining")
         if response.status_code in (403, 429) and remaining == "0":
             raise RateLimited(
@@ -208,6 +208,7 @@ def _to_file_diff(entry: dict) -> FileDiff:
 
     # Binary files above GitHub's per-file size cap arrive with no
     # patch at all
+
     if not patch:
         return FileDiff(path=path, old_path=None, status="binary", hunks=())
 
@@ -273,7 +274,7 @@ def main() -> None:
 
     
     """
-    The following block is for the testing purposes. Once github intergration is fully-setup, the following block will be removed.
+    The following block is for the trying out real-time Github PRs. Once github intergration is fully-setup, the following block will be removed.
     """
 
 
