@@ -10,6 +10,8 @@ from app.model.inference import MAX_SEQ_LENGTH, GenerationSettings, get_reviewer
 from app.services.diff import FileDiff, Hunk, iter_review_units, parse_diff
 
 
+#For gitpush only
+
 @dataclass(frozen=True)
 class ReviewComment:
     """One model comment, tied to the exact place in the diff that produced it."""
