@@ -1,14 +1,4 @@
 """Parse unified diffs into individually reviewable hunks.
-
-A PR diff is far too large for the model's 2048-token window, so it has to be
-broken up. The training data (``Dataset/msg-train.jsonl``) pairs each human
-comment with a *bare single hunk* -- a ``@@ ... @@`` header plus its body, with
-no ``diff --git`` or ``+++`` lines -- so that is the unit this module produces.
-
-Every hunk also carries its file path and line numbers, which is what posting
-inline comments back to GitHub will need later.
-
-This module is deliberately free of model/torch imports so it stays fast to test.
 """
 
 from __future__ import annotations
@@ -23,8 +13,8 @@ HUNK_HEADER = re.compile(
 
 FileStatus = Literal["added", "modified", "deleted", "renamed", "binary"]
 
-# Used when a diff arrives as a bare hunk with no file headers, which is how the
-# training data is shaped and how hand-written test patches usually look.
+# Used when a diff arrives as a bare hunk with no file headers
+
 UNKNOWN_PATH = "<unknown>"
 
 # Machine-generated files produce huge diffs and worthless reviews.
@@ -91,9 +81,7 @@ class Hunk:
     def comment_anchor(self) -> int:
         """New-file line to attach an inline comment to.
 
-        GitHub only accepts inline comments on lines that appear in the diff,
-        so anchor to the last added line and fall back to the hunk start for
-        deletion-only hunks.
+        GitHub only accepts inline comments on lines that appear in the diff
         """
         added = self.added_lines
         return added[-1][0] if added else self.new_start
@@ -124,6 +112,21 @@ def parse_diff(text: str) -> list[FileDiff]:
         if parsed is not None:
             files.append(parsed)
     return files
+
+
+def parse_file_patch(
+    path: str,
+    patch: str,
+    status: FileStatus = "modified",
+    old_path: str | None = None,
+) -> FileDiff:
+
+    return FileDiff(
+        path=path,
+        old_path=old_path,
+        status=status,
+        hunks=tuple(_parse_hunks(patch.splitlines(), path)),
+    )
 
 
 def _split_file_sections(text: str) -> Iterator[list[str]]:
@@ -240,9 +243,6 @@ def _path_from_git_header(line: str) -> str | None:
 
 def estimate_tokens(text: str) -> int:
     """Rough token count used when no real tokenizer is supplied.
-
-    Code sits near ~3 characters per token, so this errs on the high side and
-    keeps prompts safely inside the window.
     """
     return len(text) // 3 + 1
 
@@ -254,9 +254,6 @@ def split_oversized_hunk(
 ) -> list[Hunk]:
     """Break one hunk into sequential sub-hunks that each fit the budget.
 
-    Line numbers are recomputed per piece so inline comments still land on the
-    right line. Added lines advance only the new-file counter, removed lines
-    only the old-file counter, and context advances both.
     """
     if count_tokens(hunk.text) <= max_tokens:
         return [hunk]
