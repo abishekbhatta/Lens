@@ -8,7 +8,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-import sys
+
 
 import httpx
 from dotenv import load_dotenv
