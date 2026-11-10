@@ -12,28 +12,67 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from app.model.prompts import build_inference_prompt as build_prompt
+
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = BACKEND_ROOT.parent
 MODELS_DIR = BACKEND_ROOT / "models"
 BASE_MODEL_DIR = MODELS_DIR / "codellama" / "CodeLlama-7b-Instruct-hf"
 ADAPTER_DIR = MODELS_DIR / "adapters" / "sentinel-codellama"
 
+MAX_SEQ_LENGTH = 2048  # Context window the adapter was trained with.
 
-INSTRUCTION = (
-        "You are an expert code reviewer. Analyse the following unified diff, "
-        "explain the exact bug or issue in detail, and suggest the corrected code."
-)
-
-
-MAX_SEQ_LENGTH = 2048 #Context window the adapter was trained with
+# 4-bit 7B fits in ~5 GiB; transformers' allocator warmup peaks around 3.5 GiB extra.
+_MIN_GPU_FREE_BYTES = 6 * 1024**3
 
 
-def build_prompt(diff: str) -> str:
-    """Wrap a unified diff in the exact prompt format used during training."""
-    return (
-        f"[INST] {INSTRUCTION}\n\n"
-        f"```diff\n{diff}\n```\n[/INST]"
-    )
+def _gpu_free_bytes(device: int) -> int:
+    import torch
+
+    free, _ = torch.cuda.mem_get_info(device)
+    return free
+
+
+def _resolve_gpu_index(requested: int, *, allow_fallback: bool) -> int:
+    """Use ``requested`` when it has headroom; otherwise pick the emptiest GPU."""
+    import sys
+
+    import torch
+
+    count = torch.cuda.device_count()
+    if requested < 0 or requested >= count:
+        raise RuntimeError(
+            f"Invalid GPU index {requested}; this machine has {count} CUDA device(s)."
+        )
+
+    if _gpu_free_bytes(requested) >= _MIN_GPU_FREE_BYTES:
+        return requested
+
+    if not allow_fallback:
+        free_gib = _gpu_free_bytes(requested) / (1024**3)
+        raise RuntimeError(
+            f"GPU {requested} has only {free_gib:.2f} GiB free "
+            f"(need about {_MIN_GPU_FREE_BYTES / (1024**3):.0f} GiB for 4-bit load). "
+            "Free the GPU, pick another with SENTINEL_GPU, or unset SENTINEL_GPU to auto-select."
+        )
+
+    best = max(range(count), key=_gpu_free_bytes)
+    if _gpu_free_bytes(best) < _MIN_GPU_FREE_BYTES:
+        usage = ", ".join(
+            f"GPU {i}: {_gpu_free_bytes(i) / (1024**3):.2f} GiB free"
+            for i in range(count)
+        )
+        raise RuntimeError(
+            "No CUDA device has enough free memory to load the model. "
+            f"Per-GPU free memory: {usage}"
+        )
+
+    if best != requested:
+        print(
+            f"GPU {requested} is low on memory; loading on GPU {best} instead.",
+            file=sys.stderr,
+        )
+    return best
 
 
 @dataclass
@@ -60,6 +99,7 @@ class DiffReviewer:
     ) -> None:
         self.base_model_dir = base_model_dir
         self.adapter_dir = adapter_dir
+        self._gpu_explicit = gpu_index is not None or "SENTINEL_GPU" in os.environ
         self.gpu_index = gpu_index if gpu_index is not None else int(
             os.environ.get("SENTINEL_GPU", "0")
         )
@@ -72,6 +112,8 @@ class DiffReviewer:
 
         if self._model is not None:
             return
+
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
         import torch
         from peft import PeftModel
@@ -88,6 +130,11 @@ class DiffReviewer:
                 "Run: python backend/training/fine_tune.py"
             )
 
+        self.gpu_index = _resolve_gpu_index(
+            self.gpu_index, allow_fallback=not self._gpu_explicit
+        )
+        torch.cuda.set_device(self.gpu_index)
+
         # Same quantisation as training, so the adapter sees the weights it was tuned against.
 
         quantization_config = BitsAndBytesConfig(
@@ -103,6 +150,7 @@ class DiffReviewer:
             # Pin to one GPU: a 4-bit 7B fits in ~5 GiB, so sharding only adds latency.
             device_map={"": self.gpu_index},
             dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
         )
         model = PeftModel.from_pretrained(base_model, str(self.adapter_dir))
         model.eval()
@@ -192,7 +240,11 @@ def get_reviewer() -> DiffReviewer:
     global _reviewer
     if _reviewer is None:
         load_dotenv(BACKEND_ROOT / ".env")
-        _reviewer = DiffReviewer()
+        adapter = os.environ.get("SENTINEL_ADAPTER_DIR")
+        if adapter:
+            _reviewer = DiffReviewer(adapter_dir=Path(adapter))
+        else:
+            _reviewer = DiffReviewer()
     return _reviewer
 
 

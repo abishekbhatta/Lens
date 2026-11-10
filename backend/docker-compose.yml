@@ -31,6 +31,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql+asyncpg://sentinel:sentinel@postgres:5432/sentinel
+      - SENTINEL_POST_REVIEW=1
     env_file:
       - .env
     depends_on:

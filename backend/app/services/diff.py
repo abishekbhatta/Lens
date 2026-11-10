@@ -78,13 +78,44 @@ class Hunk:
         return tuple(out)
 
     @property
-    def comment_anchor(self) -> int:
-        """New-file line to attach an inline comment to.
+    def deleted_lines(self) -> tuple[tuple[int, str], ...]:
+        """``(old_file_line_number, content)`` for each deleted line."""
+        out = []
+        line_no = self.old_start
+        for line in self.lines:
+            if line.startswith("-"):
+                out.append((line_no, line[1:]))
+                line_no += 1
+            elif not line.startswith(("+", "\\")):
+                line_no += 1
+        return tuple(out)
 
-        GitHub only accepts inline comments on lines that appear in the diff
+    @property
+    def comment_side(self) -> str:
+        """GitHub diff side this comment must use.
+
+        Additions and mixed hunks attach on the right (the new file). A
+        deletion-only hunk has no right-hand line, so it attaches on the left.
+        """
+        if self.added_lines or not self.deleted_lines:
+            return "RIGHT"
+        return "LEFT"
+
+    @property
+    def comment_anchor(self) -> int:
+        """Line number GitHub will accept for an inline comment.
+
+        The number is in the new file when ``comment_side`` is RIGHT, and in
+        the old file when it is LEFT. GitHub rejects comments on lines that
+        do not appear in the diff.
         """
         added = self.added_lines
-        return added[-1][0] if added else self.new_start
+        if added:
+            return added[-1][0]
+        deleted = self.deleted_lines
+        if deleted:
+            return deleted[-1][0]
+        return self.new_start
 
 
 @dataclass(frozen=True)

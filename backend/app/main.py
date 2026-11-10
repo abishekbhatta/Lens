@@ -10,6 +10,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from app.model.inference import BACKEND_ROOT, GenerationSettings, get_reviewer
+from app.queue.store import get_queue
+from app.services.github import parse_pr_reference
 from app.services.review import review_diff
 
 logger = logging.getLogger(__name__)
@@ -31,12 +33,23 @@ class ReviewRequest(BaseModel):
 class CommentResponse(BaseModel):
     path: str
     line: int
+    side: str
     body: str
     hunk_header: str
 
 
 class ReviewResponse(BaseModel):
     comments: list[CommentResponse]
+
+
+class JobRequest(BaseModel):
+    pr: str = Field(..., description="PR URL or owner/repo#number")
+    max_comments: int | None = Field(default=20, ge=1, le=200)
+
+
+class JobCreated(BaseModel):
+    id: str
+    status: str
 
 
 @asynccontextmanager
@@ -59,7 +72,44 @@ app = FastAPI(title="Sentinel", version="0.1.0", lifespan=lifespan)
 @app.get("/health")
 def health() -> dict:
     reviewer = get_reviewer()
-    return {"status": "ok", "model_loaded": reviewer.is_loaded}
+    redis_ok = False
+    try:
+        redis_ok = get_queue().ping()
+    except Exception:
+        logger.exception("Redis health check failed")
+    return {
+        "status": "ok",
+        "model_loaded": reviewer.is_loaded,
+        "redis_ok": redis_ok,
+    }
+
+
+@app.post("/jobs", response_model=JobCreated, status_code=202)
+def create_job(request: JobRequest) -> JobCreated:
+    """Queue a pull-request review and return immediately."""
+    try:
+        parse_pr_reference(request.pr)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        job_id = get_queue().enqueue(request.pr, request.max_comments)
+    except Exception as exc:
+        logger.exception("Failed to enqueue review")
+        raise HTTPException(status_code=503, detail="job queue unavailable") from exc
+    return JobCreated(id=job_id, status="queued")
+
+
+@app.get("/jobs/{job_id}")
+def read_job(job_id: str) -> dict:
+    try:
+        job = get_queue().get(job_id)
+    except Exception as exc:
+        logger.exception("Failed to read job %s", job_id)
+        raise HTTPException(status_code=503, detail="job queue unavailable") from exc
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
 
 
 @app.post("/review", response_model=ReviewResponse)

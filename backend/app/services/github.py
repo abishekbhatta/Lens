@@ -1,12 +1,14 @@
-"""Read pull requests from the GitHub REST API.
+"""Read pull requests from the GitHub REST API and publish inline reviews.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 
 import httpx
 from dotenv import load_dotenv
@@ -48,6 +50,14 @@ class PullRequestNotFound(GitHubError):
 
 class RateLimited(GitHubError):
     pass
+
+
+def _github_error_message(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text[:200]
+    return str(body.get("message") or body.get("documentation_url") or response.text[:200])
 
 
 @dataclass(frozen=True)
@@ -96,6 +106,65 @@ def github_token() -> str | None:
     return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
 
 
+def review_summary(count: int) -> str:
+    noun = "comment" if count == 1 else "comments"
+    return f"Sentinel left {count} inline {noun} on this pull request."
+
+
+def build_review_payload(
+    commit_id: str,
+    comments: list[dict],
+    body: str | None = None,
+) -> dict:
+    """JSON body for ``POST /pulls/{n}/reviews``.
+
+    Comments that share a path, line, and side are merged. GitHub rejects a
+    review that places two comments on the same line.
+    """
+    if not commit_id:
+        raise ValueError("commit_id is required to post a review")
+
+    merged: dict[tuple[str, int, str], str] = {}
+    order: list[tuple[str, int, str]] = []
+    for comment in comments:
+        path = (comment.get("path") or "").strip()
+        text = (comment.get("body") or "").strip()
+        try:
+            line = int(comment.get("line") or 0)
+        except (TypeError, ValueError):
+            continue
+        side = comment.get("side") or "RIGHT"
+        if side not in ("LEFT", "RIGHT"):
+            side = "RIGHT"
+        if not path or not text or line < 1:
+            continue
+        key = (path, line, side)
+        if key not in merged:
+            order.append(key)
+            merged[key] = text
+        elif text not in merged[key]:
+            merged[key] = f"{merged[key]}\n\n{text}"
+
+    if not order:
+        raise ValueError("no comments to post")
+
+    return {
+        "commit_id": commit_id,
+        "body": body if body is not None else review_summary(len(order)),
+        "event": "COMMENT",
+        "comments": [
+            {
+                "path": path,
+                "body": merged[(path, line, side)],
+                "line": line,
+                "side": side,
+                "subject_type": "line",
+            }
+            for path, line, side in order
+        ],
+    }
+
+
 class GitHubClient:
     """Thin wrapper over the endpoints Sentinel needs."""
 
@@ -104,8 +173,13 @@ class GitHubClient:
         token: str | None = None,
         api_root: str = API_ROOT,
         timeout: float = 30.0,
+        client: httpx.Client | None = None,
     ) -> None:
         self.api_root = api_root.rstrip("/")
+        self._owns_client = client is None
+        if client is not None:
+            self._client = client
+            return
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": API_VERSION,
@@ -123,10 +197,12 @@ class GitHubClient:
         self.close()
 
     def close(self) -> None:
-        self._client.close()
+        if self._owns_client:
+            self._client.close()
 
     def get_pull_request(self, ref: PullRequestRef) -> PullRequest:
-        payload = self._get_json(f"/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}")
+        path = f"/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}"
+        payload = self._get_json(path)
         return PullRequest(
             ref=ref,
             title=payload.get("title") or "",
@@ -171,8 +247,29 @@ class GitHubClient:
         self._raise_for_status(response, ref)
         return response.text
 
+    def create_review(
+        self,
+        ref: PullRequestRef,
+        commit_id: str,
+        comments: list[dict],
+        body: str | None = None,
+    ) -> dict:
+        """Submit one pull-request review containing the inline comments.
+
+        ``event`` is COMMENT, so the review is published and does not approve
+        the pull request or request changes.
+        """
+        payload = build_review_payload(commit_id, comments, body)
+        response = self._client.post(
+            f"{self.api_root}/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}/reviews",
+            json=payload,
+        )
+        self._raise_for_status(response, f"{ref} review")
+        return response.json()
+
     def _get_json(self, path: str, params: dict | None = None):
-        response = self._client.get(f"{self.api_root}{path}", params=params)
+        url = f"{self.api_root}{path}"
+        response = self._client.get(url, params=params)
         self._raise_for_status(response, path)
         return response.json()
 
@@ -181,8 +278,16 @@ class GitHubClient:
             return
 
         if response.status_code == 404:
+            detail = _github_error_message(response)
+            hint = (
+                "GitHub returned 404 for this pull request number. The PR may not "
+                "exist (deleted or never opened), or the repo name is wrong. "
+                "For a public read-only smoke test use e.g. "
+                "pallets/flask#6176. For this project use "
+                "abishekbhatta/Sentinel_#N after you open pull request N on GitHub."
+            )
             raise PullRequestNotFound(
-                f"{context} not found, or the token cannot see it (private repo?)"
+                f"{context} not found ({detail}). {hint}"
             )
 
         # GitHub reports both rate limiting as 403. They provide 5000 requests/ hr
@@ -194,6 +299,12 @@ class GitHubClient:
             )
         if response.status_code == 401:
             raise GitHubError("GitHub rejected the token (401). Check GITHUB_TOKEN.")
+        if response.status_code == 403:
+            raise GitHubError(
+                "GitHub refused the request (403). Writing a review needs a "
+                "token with pull request write access. "
+                f"{response.text[:200]}"
+            )
 
         raise GitHubError(
             f"GitHub returned {response.status_code} for {context}: "
@@ -225,7 +336,18 @@ def main() -> None:
     import sys
 
     parser = argparse.ArgumentParser(description="Inspect or review a pull request.")
-    parser.add_argument("--pr", required=True, help="PR URL or owner/repo#number")
+    parser.add_argument(
+        "--pr",
+        default=None,
+        help="PR URL or owner/repo#number (not needed with --diff-file).",
+    )
+    parser.add_argument(
+        "--diff-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Review a local unified diff instead of fetching a pull request.",
+    )
     parser.add_argument(
         "--raw",
         action="store_true",
@@ -243,9 +365,58 @@ def main() -> None:
         metavar="N",
         help="Cap model calls (default: all reviewable hunks). Use on large PRs.",
     )
+    parser.add_argument(
+        "--post",
+        action="store_true",
+        help="Publish the generated comments as a GitHub review on the pull request.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="With --post, print the review JSON instead of calling GitHub.",
+    )
     args = parser.parse_args()
+    if args.post and not args.review:
+        parser.error("--post requires --review")
+    if args.dry_run and not args.post:
+        parser.error("--dry-run requires --post")
+    if args.diff_file and args.pr:
+        parser.error("Use either --pr or --diff-file, not both")
+    if not args.diff_file and not args.pr:
+        parser.error("Provide --pr or --diff-file (or use: python -m app.tools.try_review)")
+
+    if args.diff_file:
+        if not args.review:
+            parser.error("--diff-file requires --review")
+        diff_path = args.diff_file
+        if not diff_path.is_absolute():
+            diff_path = BACKEND_ROOT / diff_path
+        if not diff_path.exists():
+            raise SystemExit(f"Diff file not found: {diff_path}")
+        from app.services.review import review_diff
+
+        print("\nLoading model...", file=sys.stderr)
+        comments = review_diff(diff_path.read_text(), max_comments=args.max_hunks)
+        if not comments:
+            print("\nNo comments generated.")
+            return
+        for comment in comments:
+            print(f"--- {comment.path}:{comment.line} ({comment.side}) ---")
+            print(comment.body)
+            print()
+        if args.post or args.dry_run:
+            parser.error("--post/--dry-run need a real --pr (use try_review for local diffs)")
+        return
 
     ref = parse_pr_reference(args.pr)
+    try:
+        return _run_pr_command(args, ref)
+    except PullRequestNotFound as exc:
+        print(exc, file=sys.stderr)
+        raise SystemExit(1) from None
+
+
+def _run_pr_command(args, ref: PullRequestRef) -> None:
     with GitHubClient() as client:
         if args.raw:
             print(client.get_pull_request_diff(ref))
@@ -272,14 +443,8 @@ def main() -> None:
     if not args.review:
         return
 
-    
-    """
-    The following block is for the trying out real-time Github PRs. Once github intergration is fully-setup, the following block will be removed.
-    """
+    from dataclasses import asdict
 
-
-    #Used for to display the comments on the terminal.
-    
     from app.services.review import review_files
 
     print("\nLoading model...", file=sys.stderr)
@@ -290,9 +455,30 @@ def main() -> None:
 
     print(f"\n{len(comments)} comment(s):\n")
     for comment in comments:
-        print(f"--- {comment.path}:{comment.line} ---")
+        print(f"--- {comment.path}:{comment.line} ({comment.side}) ---")
         print(comment.body)
         print()
+
+    if not args.post:
+        return
+
+    payload = build_review_payload(
+        pr.head_sha,
+        [asdict(comment) for comment in comments],
+    )
+    if args.dry_run:
+        print(json.dumps(payload, indent=2))
+        return
+
+    with GitHubClient() as client:
+        posted = client.create_review(
+            ref,
+            pr.head_sha,
+            [asdict(comment) for comment in comments],
+        )
+    url = posted.get("html_url") or posted.get("id")
+    print(f"Posted review: {url}")
+    return None
 
 
 if __name__ == "__main__":

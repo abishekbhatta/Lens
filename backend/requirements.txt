@@ -30,3 +30,4 @@ bitsandbytes>=0.46.1
 transformers
 
 pytest>=8.0.0
+fakeredis>=2.26.0

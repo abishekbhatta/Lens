@@ -8,12 +8,17 @@ Run from repo root:
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from app.model.prompts import build_training_example  # noqa: E402
 DATASET_DIR = REPO_ROOT / "Dataset"
 MODELS_DIR = BACKEND_ROOT / "models"
 ADAPTER_DIR = MODELS_DIR / "adapters" / "sentinel-codellama"
@@ -149,14 +154,13 @@ def _fine_tune() -> Path:
     dataset = DatasetDict(splits)
 
     def format_prompt(example: dict) -> dict:
-        patch = example.get("patch") or ""
-        msg = (example.get("msg") or "").strip()
-        text = (
-            "[INST] You are an expert code reviewer. Analyse the following "
-            "unified diff and write a concise, actionable review comment.\n\n"
-            f"```diff\n{patch}\n```\n[/INST] {msg}{tokenizer.eos_token}"
-        )
-        return {"text": text}
+        return {
+            "text": build_training_example(
+                example.get("patch") or "",
+                example.get("msg") or "",
+                tokenizer.eos_token,
+            )
+        }
 
     dataset = DatasetDict(
         {

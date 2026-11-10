@@ -18,8 +18,19 @@ class ReviewComment:
 
     path: str
     line: int
+    side: str
     body: str
     hunk_header: str
+
+
+def comment_from_hunk(hunk: Hunk, body: str) -> ReviewComment:
+    return ReviewComment(
+        path=hunk.path,
+        line=hunk.comment_anchor,
+        side=hunk.comment_side,
+        body=body,
+        hunk_header=hunk.header,
+    )
 
 
 def diff_token_budget(settings: GenerationSettings, prompt_overhead: int) -> int:
@@ -54,14 +65,7 @@ def review_diff(
         body = reviewer.review(hunk.text, settings)
         if not body:
             continue
-        comments.append(
-            ReviewComment(
-                path=hunk.path,
-                line=hunk.comment_anchor,
-                body=body,
-                hunk_header=hunk.header,
-            )
-        )
+        comments.append(comment_from_hunk(hunk, body))
     return comments
 
 
@@ -91,12 +95,5 @@ def review_files(
         body = reviewer.review(hunk.text, settings)
         if not body:
             continue
-        comments.append(
-            ReviewComment(
-                path=hunk.path,
-                line=hunk.comment_anchor,
-                body=body,
-                hunk_header=hunk.header,
-            )
-        )
+        comments.append(comment_from_hunk(hunk, body))
     return comments
