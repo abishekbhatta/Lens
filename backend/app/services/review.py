@@ -35,7 +35,10 @@ def comment_from_hunk(hunk: Hunk, body: str) -> ReviewComment:
 
 def diff_token_budget(settings: GenerationSettings, prompt_overhead: int) -> int:
     """Tokens left for diff content once the answer and scaffolding are reserved."""
-    return MAX_SEQ_LENGTH - settings.max_new_tokens - prompt_overhead
+    reserved = settings.max_new_tokens
+    if settings.clarify:
+        reserved = max(reserved, settings.clarify_max_new_tokens)
+    return MAX_SEQ_LENGTH - reserved - prompt_overhead
 
 
 def review_diff(

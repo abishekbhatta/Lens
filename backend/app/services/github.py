@@ -8,7 +8,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-
+import sys
 
 import httpx
 from dotenv import load_dotenv
@@ -158,7 +158,6 @@ def build_review_payload(
                 "body": merged[(path, line, side)],
                 "line": line,
                 "side": side,
-                "subject_type": "line",
             }
             for path, line, side in order
         ],

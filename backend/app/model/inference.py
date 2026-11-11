@@ -7,11 +7,13 @@ Loads the 4-bit base model and the LoRA adapter and turns a unified diff into a 
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
 
+from app.model.prompts import build_clarify_prompt
 from app.model.prompts import build_inference_prompt as build_prompt
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -75,17 +77,68 @@ def _resolve_gpu_index(requested: int, *, allow_fallback: bool) -> int:
     return best
 
 
+def needs_clarification(comment: str, *, min_words: int = 24) -> bool:
+    """True when a first-pass comment is too short to explain the finding."""
+    text = comment.strip()
+    if not text:
+        return False
+    return len(text.split()) < min_words
+
+
+_COMMENT_LABEL = re.compile(
+    r"(?im)^(?:rewritten\s+)?(?:review\s+)?comment\s*:\s*"
+)
+
+
+def _clean_comment(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    label = _COMMENT_LABEL.search(text)
+    if label:
+        text = text[label.end() :].strip()
+    elif text.startswith(("@@", "diff --git", "--- ", "+++ ")):
+        paragraphs = re.split(r"\n\s*\n", text)
+        for part in reversed(paragraphs):
+            stripped = part.strip()
+            if stripped and not stripped.startswith(("@@", "diff --git", "--- ", "+++ ", "```")):
+                text = stripped
+                break
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        text = text[1:-1].strip()
+    text = re.sub(r"^```[^\n]*$", "", text, flags=re.M)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _pick_comment(draft: str, clarified: str) -> str:
+    draft = _clean_comment(draft)
+    clarified = _clean_comment(clarified)
+    # Keep the adapter finding when the rewrite is empty or still a one-liner.
+    if not clarified or needs_clarification(clarified):
+        return draft
+    return clarified
+
+
 @dataclass
 class GenerationSettings:
     """Decoding knobs. Low temperature keeps reviews grounded in the diff."""
 
-    # Measured outputs run 6-26 tokens, matching the short human comments in the
-    # training set. Every token reserved here is a token taken away from the diff,
-    # so this stays tight while leaving generous headroom.
+    # First-pass outputs follow the training set (often a short finding). Extra
+    # tokens here come out of the diff budget, so this stays modest.
     max_new_tokens: int = 160
+    min_new_tokens: int = 0
     temperature: float = 0.4
     top_p: float = 0.9
     repetition_penalty: float = 1.15
+    # Rewrite terse adapter output into a 2-4 sentence GitHub comment.
+    clarify: bool = True
+    clarify_max_new_tokens: int = 256
+    clarify_min_new_tokens: int = 72
 
 
 class DiffReviewer:
@@ -190,36 +243,75 @@ class DiffReviewer:
         self.load()
         settings = settings or GenerationSettings()
 
+        fitted = self._fit_to_context(diff, settings.max_new_tokens)
+        draft = self._generate(build_prompt(fitted), settings)
+        if not draft:
+            return ""
+        if not settings.clarify or not needs_clarification(draft):
+            return _clean_comment(draft)
+        return self._clarify(diff, draft, settings)
+
+    def _clarify(self, diff: str, draft: str, settings: GenerationSettings) -> str:
+        """Rewrite a terse first-pass finding into a clarifying comment."""
+        clarify_settings = GenerationSettings(
+            max_new_tokens=settings.clarify_max_new_tokens,
+            min_new_tokens=settings.clarify_min_new_tokens,
+            temperature=min(settings.temperature, 0.3),
+            top_p=settings.top_p,
+            repetition_penalty=settings.repetition_penalty,
+            clarify=False,
+        )
+        overhead = len(self._tokenizer(build_clarify_prompt("", draft))["input_ids"])
+        fitted = self._fit_to_context(
+            diff, clarify_settings.max_new_tokens, prompt_overhead=overhead
+        )
+        prompt = build_clarify_prompt(fitted, draft)
+        # The LoRA adapter was trained to emit short findings. Disable it so the
+        # base Instruct model can follow the rewrite instruction.
+        disable = getattr(self._model, "disable_adapter", None)
+        if disable is not None:
+            with disable():
+                clarified = self._generate(prompt, clarify_settings)
+        else:
+            clarified = self._generate(prompt, clarify_settings)
+        return _pick_comment(draft, clarified)
+
+    def _generate(self, prompt: str, settings: GenerationSettings) -> str:
         import torch
 
-        diff = self._fit_to_context(diff, settings.max_new_tokens)
-        prompt = build_prompt(diff)
         inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
-
-        with torch.inference_mode():
-            output = self._model.generate(
-                **inputs,
-                max_new_tokens=settings.max_new_tokens,
-                do_sample=settings.temperature > 0,
-                temperature=settings.temperature,
-                top_p=settings.top_p,
-                repetition_penalty=settings.repetition_penalty,
-                eos_token_id=self._tokenizer.eos_token_id,
-                pad_token_id=self._tokenizer.pad_token_id,
+        generate_kwargs = {
+            "max_new_tokens": settings.max_new_tokens,
+            "do_sample": settings.temperature > 0,
+            "temperature": settings.temperature,
+            "top_p": settings.top_p,
+            "repetition_penalty": settings.repetition_penalty,
+            "eos_token_id": self._tokenizer.eos_token_id,
+            "pad_token_id": self._tokenizer.pad_token_id,
+        }
+        if settings.min_new_tokens:
+            generate_kwargs["min_new_tokens"] = min(
+                settings.min_new_tokens, settings.max_new_tokens
             )
-
-        # Slice off the prompt so only the model's answer is decoded.
+        with torch.inference_mode():
+            output = self._model.generate(**inputs, **generate_kwargs)
         generated = output[0][inputs["input_ids"].shape[-1] :]
         return self._tokenizer.decode(generated, skip_special_tokens=True).strip()
 
-    def _fit_to_context(self, diff: str, max_new_tokens: int) -> str:
+    def _fit_to_context(
+        self,
+        diff: str,
+        max_new_tokens: int,
+        prompt_overhead: int | None = None,
+    ) -> str:
         """Trim the diff body so prompt + answer stay inside the context window.
 
         Truncating the diff rather than the tokenised prompt keeps the closing
         fence and the ``[/INST]`` marker intact; without them the model has no
         cue that it should start answering.
         """
-        budget = MAX_SEQ_LENGTH - max_new_tokens - self._prompt_overhead
+        overhead = self._prompt_overhead if prompt_overhead is None else prompt_overhead
+        budget = MAX_SEQ_LENGTH - max_new_tokens - overhead
         if budget <= 0:
             raise ValueError(
                 f"max_new_tokens={max_new_tokens} leaves no room for the diff "
@@ -262,6 +354,11 @@ def main() -> None:
     )
     parser.add_argument("--max-new-tokens", type=int, default=160)
     parser.add_argument("--temperature", type=float, default=0.4)
+    parser.add_argument(
+        "--no-clarify",
+        action="store_true",
+        help="Skip the second pass that expands terse findings.",
+    )
     args = parser.parse_args()
 
     diff = args.diff_file.read_text() if args.diff_file else sys.stdin.read()
@@ -273,6 +370,7 @@ def main() -> None:
         GenerationSettings(
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
+            clarify=not args.no_clarify,
         ),
     )
     print(comment)
