@@ -25,7 +25,8 @@ CLARIFY_INSTRUCTION = (
     "If the draft says to keep a line, explain where it is still used. "
     "Do not invent a different bug, platform, or install issue. "
     "Do not repeat the diff. Do not wrap the comment in markdown code fences. "
-    "Output only the review comment."
+    "Output only the review comment. Do not add any other text or markdown formatting. Do not add any headers or footers. For examples, Sure, here is my revised comment"
+    "Just provide the expanded comments."
 )
 
 
