@@ -158,7 +158,6 @@ def build_review_payload(
                 "body": merged[(path, line, side)],
                 "line": line,
                 "side": side,
-                "subject_type": "line",
             }
             for path, line, side in order
         ],

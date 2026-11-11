@@ -79,17 +79,19 @@ def format_report(rows: list[dict]) -> dict:
 
 
 def generate_scores(rows: list[dict]) -> dict:
-    from app.model.inference import get_reviewer
+    from app.model.inference import GenerationSettings, get_reviewer
 
     reviewer = get_reviewer()
     reviewer.load()
+    # Score the first-pass adapter output against the short human labels.
+    settings = GenerationSettings(clarify=False)
     pairs: list[tuple[str, str]] = []
     for index, row in enumerate(rows, start=1):
         patch = row.get("patch") or ""
         reference = (row.get("msg") or "").strip()
         if not patch.strip() or not reference:
             continue
-        prediction = reviewer.review(patch)
+        prediction = reviewer.review(patch, settings)
         pairs.append((prediction, reference))
         print(f"[{index}] f1={unigram_f1(prediction, reference):.3f}", file=sys.stderr)
     return {"scored": len(pairs), "mean_unigram_f1": mean_f1(pairs)}
