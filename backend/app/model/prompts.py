@@ -6,7 +6,7 @@ was tuned for. A second prompt then rewrites the terse finding into a
 clarifying GitHub comment.
 """
 
-from __future__ import annotations
+from __future__ import annotations 
 
 REVIEW_INSTRUCTION = (
     "You are an expert code reviewer. Analyse the following "
