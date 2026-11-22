@@ -21,8 +21,11 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 QUEUE_KEY = "sentinel:review:queue"
 JOB_PREFIX = "sentinel:job:"
+DELIVERY_PREFIX = "sentinel:delivery:"
 # Finished jobs are kept long enough to poll, then Redis drops them.
 RESULT_TTL_SECONDS = 60 * 60 * 24
+# GitHub retries a delivery for about a day. Remember it for that long.
+DELIVERY_TTL_SECONDS = 60 * 60 * 24
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -41,10 +44,32 @@ class JobQueue:
             return
         load_dotenv(BACKEND_ROOT / ".env")
         resolved = url or os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
-        self._redis = redis.Redis.from_url(resolved, decode_responses=True)
+        # redis-py's default socket timeout is 5s, the same as BRPOP's wait.
+        # The socket then expires before Redis sends its empty reply and the
+        # worker dies. Leave the read timeout unset so a blocking pop can finish.
+        self._redis = redis.Redis.from_url(
+            resolved,
+            decode_responses=True,
+            socket_timeout=None,
+            socket_connect_timeout=5,
+        )
 
     def ping(self) -> bool:
         return bool(self._redis.ping())
+
+    def claim_delivery(self, delivery_id: str) -> bool:
+        """Return True the first time this GitHub delivery id is seen."""
+        claimed = self._redis.set(
+            DELIVERY_PREFIX + delivery_id,
+            "1",
+            nx=True,
+            ex=DELIVERY_TTL_SECONDS,
+        )
+        return bool(claimed)
+
+    def release_delivery(self, delivery_id: str) -> None:
+        """Forget a delivery so GitHub's retry can enqueue the review."""
+        self._redis.delete(DELIVERY_PREFIX + delivery_id)
 
     def enqueue(self, pr: str, max_comments: int | None) -> str:
         job_id = uuid.uuid4().hex
