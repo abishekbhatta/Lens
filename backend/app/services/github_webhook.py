@@ -6,7 +6,7 @@ it, and posts the comments. Drafts and later pushes are left alone so a
 review is not published on every commit.
 """
 
-from __future__ import annotations
+from __future__ import annotation
 
 import hashlib
 import hmac
