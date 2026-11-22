@@ -1,4 +1,4 @@
-"""Turn a GitHub ``pull_request`` delivery into a queued review.
+"""Turn a GitHub ``pull_request`` delivery into a queued review
 
 GitHub must be able to reach ``POST /webhooks/github``. Configure the
 repository (or organization) webhook with:
