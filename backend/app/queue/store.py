@@ -41,7 +41,15 @@ class JobQueue:
             return
         load_dotenv(BACKEND_ROOT / ".env")
         resolved = url or os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
-        self._redis = redis.Redis.from_url(resolved, decode_responses=True)
+        # redis-py's default socket timeout is 5s, the same as BRPOP's wait.
+        # The socket then expires before Redis sends its empty reply and the
+        # worker dies. Leave the read timeout unset so a blocking pop can finish.
+        self._redis = redis.Redis.from_url(
+            resolved,
+            decode_responses=True,
+            socket_timeout=None,
+            socket_connect_timeout=5,
+        )
 
     def ping(self) -> bool:
         return bool(self._redis.ping())
@@ -66,6 +74,27 @@ class JobQueue:
     def dequeue(self, timeout: int = 5) -> str | None:
         """Block until a job id is available, or return None on timeout."""
         item = self._redis.brpop(QUEUE_KEY, timeout=timeout)
+        # #region agent log
+        if not getattr(self, "_dequeue_logged", False):
+            try:
+                import time
+                from pathlib import Path
+
+                self._dequeue_logged = True
+                _payload = {
+                    "sessionId": "bffb32",
+                    "runId": "post-fix",
+                    "hypothesisId": "A",
+                    "location": "store.py:dequeue",
+                    "message": "brpop finished",
+                    "data": {"timeout": timeout, "got_job": item is not None},
+                    "timestamp": int(time.time() * 1000),
+                }
+                with Path("/home/abhatta29/Sentinel_/.cursor/debug-bffb32.log").open("a") as _log:
+                    _log.write(json.dumps(_payload) + "\n")
+            except Exception:
+                pass
+        # #endregion
         if item is None:
             return None
         _key, job_id = item

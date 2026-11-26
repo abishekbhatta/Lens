@@ -1,14 +1,5 @@
-"""Background worker that turns queued pull requests into review comments.
+"""Background worker that turns queued pull requests into review comments."""
 
-Run it next to the API, on a machine with a GPU:
-
-    python -m app.workers.review_worker
-
-Docker Compose starts this as the ``worker`` service. It loads the model
-once, then blocks on Redis until a job arrives. After the model finishes,
-the worker publishes the comments as a GitHub review unless
-``SENTINEL_POST_REVIEW`` is ``0``.
-"""
 
 from __future__ import annotations
 
