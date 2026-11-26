@@ -91,6 +91,27 @@ class JobQueue:
     def dequeue(self, timeout: int = 5) -> str | None:
         """Block until a job id is available, or return None on timeout."""
         item = self._redis.brpop(QUEUE_KEY, timeout=timeout)
+        # #region agent log
+        if not getattr(self, "_dequeue_logged", False):
+            try:
+                import time
+                from pathlib import Path
+
+                self._dequeue_logged = True
+                _payload = {
+                    "sessionId": "bffb32",
+                    "runId": "post-fix",
+                    "hypothesisId": "A",
+                    "location": "store.py:dequeue",
+                    "message": "brpop finished",
+                    "data": {"timeout": timeout, "got_job": item is not None},
+                    "timestamp": int(time.time() * 1000),
+                }
+                with Path("/home/abhatta29/Sentinel_/.cursor/debug-bffb32.log").open("a") as _log:
+                    _log.write(json.dumps(_payload) + "\n")
+            except Exception:
+                pass
+        # #endregion
         if item is None:
             return None
         _key, job_id = item
