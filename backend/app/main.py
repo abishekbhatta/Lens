@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.model.inference import BACKEND_ROOT, GenerationSettings, get_reviewer
 from app.queue.store import get_queue
 from app.services.github import parse_pr_reference
+from app.services.github_webhook import handle_github_webhook
 from app.services.review import review_diff
 
 logger = logging.getLogger(__name__)
@@ -82,6 +85,45 @@ def health() -> dict:
         "model_loaded": reviewer.is_loaded,
         "redis_ok": redis_ok,
     }
+
+
+@app.post("/webhooks/github")
+async def github_webhook(request: Request) -> JSONResponse:
+    """Accept a GitHub pull_request delivery and queue the review.
+
+    The response is sent before the model runs. The worker fetches the diff
+    and posts the review comments.
+    """
+    body = await request.body()
+    outcome = handle_github_webhook(
+        body=body,
+        event=request.headers.get("X-GitHub-Event"),
+        signature=request.headers.get("X-Hub-Signature-256"),
+        delivery=request.headers.get("X-GitHub-Delivery"),
+        secret=os.environ.get("GITHUB_WEBHOOK_SECRET"),
+        queue=get_queue(),
+    )
+    # #region agent log
+    try:
+        import json
+        import time
+        from pathlib import Path
+
+        _payload = {
+            "sessionId": "bffb32",
+            "runId": "post-fix",
+            "hypothesisId": "A",
+            "location": "main.py:github_webhook",
+            "message": "webhook handled",
+            "data": {"status_code": outcome.status_code, "status": outcome.body.get("status")},
+            "timestamp": int(time.time() * 1000),
+        }
+        with Path("/home/abhatta29/Sentinel_/.cursor/debug-bffb32.log").open("a") as _log:
+            _log.write(json.dumps(_payload) + "\n")
+    except Exception:
+        pass
+    # #endregion
+    return JSONResponse(outcome.body, status_code=outcome.status_code)
 
 
 @app.post("/jobs", response_model=JobCreated, status_code=202)
