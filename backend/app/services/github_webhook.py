@@ -1,16 +1,4 @@
 """Turn a GitHub ``pull_request`` delivery into a queued review.
-
-GitHub must be able to reach ``POST /webhooks/github``. Configure the
-repository (or organization) webhook with:
-
-- Content type ``application/json``
-- The same secret as ``GITHUB_WEBHOOK_SECRET``
-- The "Pull requests" event
-
-A new pull request (``opened``) and a draft that becomes ready
-(``ready_for_review``) are enqueued. The worker fetches the diff, reviews
-it, and posts the comments. Drafts and later pushes are left alone so a
-review is not published on every commit.
 """
 
 from __future__ import annotations
