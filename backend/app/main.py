@@ -103,26 +103,6 @@ async def github_webhook(request: Request) -> JSONResponse:
         secret=os.environ.get("GITHUB_WEBHOOK_SECRET"),
         queue=get_queue(),
     )
-    # #region agent log
-    try:
-        import json
-        import time
-        from pathlib import Path
-
-        _payload = {
-            "sessionId": "bffb32",
-            "runId": "post-fix",
-            "hypothesisId": "A",
-            "location": "main.py:github_webhook",
-            "message": "webhook handled",
-            "data": {"status_code": outcome.status_code, "status": outcome.body.get("status")},
-            "timestamp": int(time.time() * 1000),
-        }
-        with Path("/home/abhatta29/Sentinel_/.cursor/debug-bffb32.log").open("a") as _log:
-            _log.write(json.dumps(_payload) + "\n")
-    except Exception:
-        pass
-    # #endregion
     return JSONResponse(outcome.body, status_code=outcome.status_code)
 
 
